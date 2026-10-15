@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package delivery.order.v1;
+
+option go_package = "github.com/VitalyMars/delivery_go/gen/order/v1;orderv1";
+
+service OrderService {
+    rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
+    rpc ChangeOrderStatus(ChangeOrderStatusRequest) returns (ChangeOrderStatusResponse);
+    rpc MarkPaymentConfirmed(MarkPaymentConfirmedRequest) returns (MarkPaymentConfirmedResponse);
+}
+
+message GetOrderRequest {
+    string order_id = 1;
+}
+
+message GetOrderResponse {
+    string order_id = 1;
+    string status = 2;
+    int32 total = 3;
+}
+
+message ChangeOrderStatusRequest {
+    string order_id = 1;
+    string status = 2;
+    string reason = 3;
+}
+
+message ChangeOrderStatusResponse {
+    bool success = 1;
+}
+
+message MarkPaymentConfirmedRequest {
+    string order_id = 1;
+    string payment_id = 2;
+}
+
+message MarkPaymentConfirmedResponse {
+    bool success = 1;
+}

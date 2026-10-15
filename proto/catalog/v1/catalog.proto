@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package catalog.v1;
+
+option go_package = "github.com/VitalyMars/delivery_go/gen/catalog/v1;catalogv1";
+
+service CatalogService {
+    rpc ValidateItems(ValidateItemsRequest) returns (ValidateItemsResponse);
+    rpc GetRestaurant(GetRestaurantRequest) returns (GetRestaurantResponse);
+    rpc SetDishAvailability(SetDishAvailabilityRequest) returns (SetDishAvailabilityResponse);
+}
+
+message ValidateItemsRequest {
+    string restaurant_id = 1;
+    repeated OrderItem items = 2;
+}
+
+message OrderItem {
+    string dish_id = 1;
+    int32 quantity = 2;
+}
+
+message ValidateItemsResponse {
+    bool valid = 1;
+    repeated ValidatedItem items = 2;
+}
+
+message ValidatedItem {
+    string item_id = 1;
+    string restaurant_id = 2;
+    int32 requested_quantity = 3;
+    bool available = 4;
+    int32 actual_price = 5;
+    string name = 6;
+}
+
+message GetRestaurantRequest {
+    string restaurant_id = 1;
+}
+
+message GetRestaurantResponse {
+    string id = 1;
+    string name = 2;
+    string address = 3;
+}
+
+message SetDishAvailabilityRequest {
+    string dish_id = 1;
+    bool available = 2;
+}
+
+message SetDishAvailabilityResponse {
+    bool success = 1;
+}

@@ -1,0 +1,28 @@
+﻿# IDE
+.idea/
+.vscode/
+
+# Go
+*.exe
+*.test
+*.out
+/vendor/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+kafka_check.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+
+# Local test artifacts
+kafka_check.txt

@@ -1,0 +1,2 @@
+ALTER TABLE deliveries
+ADD COLUMN estimated_at TIMESTAMPTZ;
