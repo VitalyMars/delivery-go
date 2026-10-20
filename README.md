@@ -1,6 +1,6 @@
 # Delivery Go
 
-Учебный сервис доставки еды: Go, PostgreSQL, gRPC, Kafka, transactional outbox и отправка уведомлений через Mailpit.
+Сервис доставки еды: Go, PostgreSQL, gRPC, Kafka, transactional outbox и отправка уведомлений через Mailpit.
 
 ## Быстрый запуск
 
