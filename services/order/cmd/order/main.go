@@ -7,17 +7,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
+	orderv1 "github.com/VitalyMars/delivery_go/gen/order/v1"
+	"github.com/VitalyMars/delivery_go/pkg/auth"
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"github.com/VitalyMars/delivery_go/services/order/internal/catalog"
 	"github.com/VitalyMars/delivery_go/services/order/internal/config"
+	ordergrpc "github.com/VitalyMars/delivery_go/services/order/internal/grpc"
 	"github.com/VitalyMars/delivery_go/services/order/internal/handler"
 	"github.com/VitalyMars/delivery_go/services/order/internal/kafka"
 	"github.com/VitalyMars/delivery_go/services/order/internal/repository"
 	"github.com/VitalyMars/delivery_go/services/order/internal/service"
-
-	orderv1 "github.com/VitalyMars/delivery_go/gen/order/v1"
-	ordergrpc "github.com/VitalyMars/delivery_go/services/order/internal/grpc"
 	"google.golang.org/grpc"
 )
 
@@ -28,22 +31,29 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
+	if err := transport.ValidateInternalKey(); err != nil {
+		log.Fatal(err)
+	}
+	if err := auth.ValidateConfig(); err != nil {
+		log.Fatal(err)
+	}
+	var workers sync.WaitGroup
 
-	db, err := config.NewDB(ctx)
+	startupCtx, cancelStartup := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStartup()
+	db, err := config.NewDB(startupCtx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	if err := db.Ping(ctx); err != nil {
+	if err := db.Ping(startupCtx); err != nil {
 		log.Fatal(err)
 	}
 
 	log.Println("database connected")
 
-	kafkaProducer, err := kafka.NewProducer([]string{
-		"localhost:9092",
-	})
+	kafkaProducer, err := kafka.NewProducer(transport.Brokers())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -57,10 +67,10 @@ func main() {
 		kafkaProducer,
 	)
 
-	go outboxPublisher.Run(ctx)
+	workers.Go(func() { outboxPublisher.Run(ctx) })
 	log.Println("outbox publisher started")
 
-	catalogClient, err := catalog.NewClient("127.0.0.1:9090")
+	catalogClient, err := catalog.NewClient(transport.Env("CATALOG_GRPC_ADDRESS", "127.0.0.1:9090"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -74,7 +84,7 @@ func main() {
 	)
 
 	orderConsumer, err := kafka.NewConsumer(
-		[]string{"localhost:9092"},
+		transport.Brokers(),
 		"order-service-delivery-events-v1",
 		"delivery.courier_assigned",
 		orderRepository,
@@ -83,7 +93,12 @@ func main() {
 		log.Fatalf("create Order Kafka consumer: %v", err)
 	}
 
-	go orderConsumer.Run(ctx)
+	workers.Go(func() {
+		if err := orderConsumer.Run(ctx); err != nil {
+			log.Printf("consumer stopped: %v", err)
+			stop()
+		}
+	})
 	log.Println("Order Kafka consumer started")
 
 	orderService := service.NewOrderService(
@@ -93,11 +108,11 @@ func main() {
 	orderHandler := handler.NewOrderHandler(orderService)
 
 	orderGRPCServer := ordergrpc.NewServer(orderService)
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(transport.InternalServer))
 
 	orderv1.RegisterOrderServiceServer(grpcServer, orderGRPCServer)
 
-	grpcListener, err := net.Listen("tcp", ":9091")
+	grpcListener, err := net.Listen("tcp", transport.Env("GRPC_ADDRESS", ":9091"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -111,16 +126,9 @@ func main() {
 		}
 	}()
 
-	cartRepository := repository.NewCartRepository(db)
-	cartService := service.NewCartService(cartRepository)
-	cartHandler := handler.NewCartHandler(cartService)
+	router := handler.NewRouter(orderHandler)
 
-	router := handler.NewRouter(orderHandler, cartHandler)
-
-	httpServer := &http.Server{
-		Addr:    ":8081",
-		Handler: router,
-	}
+	httpServer := transport.Server(transport.Env("HTTP_ADDRESS", ":8081"), router)
 
 	httpErr := make(chan error, 1)
 
@@ -142,11 +150,16 @@ func main() {
 	}
 
 	stop()
-	grpcServer.GracefulStop()
+	transport.StopGRPC(grpcServer)
 
-	if err := httpServer.Shutdown(context.Background()); err != nil {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP shutdown error: %v", err)
+		_ = httpServer.Close()
 	}
 
 	log.Println("Order Service stopped")
+	workers.Wait()
+
 }

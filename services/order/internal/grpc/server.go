@@ -2,10 +2,12 @@ package grpc
 
 import (
 	"context"
+	"errors"
 
 	orderv1 "github.com/VitalyMars/delivery_go/gen/order/v1"
 	"github.com/VitalyMars/delivery_go/services/order/internal/service"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -33,7 +35,10 @@ func (s *Server) GetOrder(
 
 	result, err := s.orderService.GetOrderByID(ctx, orderID)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, "order not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, status.Error(codes.NotFound, "order not found")
+		}
+		return nil, status.Error(codes.Internal, "failed to read order")
 	}
 
 	return &orderv1.GetOrderResponse{

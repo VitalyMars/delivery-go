@@ -98,9 +98,9 @@ func (r *DeliveryRepository) AssignNextWaitingDelivery(
 		SET courier_id = $1,
 		    status = 'courier_assigned',
 		    assigned_at = $2,
-		    updated_at = $2
+		    updated_at = $2, estimated_at = $4
 		WHERE id = $3
-	`, courier.ID, now, delivery.ID)
+	`, courier.ID, now, delivery.ID, estimatedAt)
 	if err != nil {
 		return false, fmt.Errorf("assign waiting delivery: %w", err)
 	}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/VitalyMars/delivery_go/pkg/auth"
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"github.com/VitalyMars/delivery_go/services/user/internal/repository"
 	"github.com/VitalyMars/delivery_go/services/user/internal/service"
 	"github.com/go-chi/chi/v5"
@@ -33,7 +35,7 @@ type userResponse struct {
 
 func (h *UserHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req authRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := transport.Decode(w, r, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -46,7 +48,7 @@ func (h *UserHandler) Register(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, repository.ErrEmailExists):
 			http.Error(w, err.Error(), http.StatusConflict)
 		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -58,7 +60,7 @@ func (h *UserHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 func (h *UserHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req authRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := transport.Decode(w, r, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -73,9 +75,16 @@ func (h *UserHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, userResponse{
-		ID: user.ID, Name: user.Name, Email: user.Email,
-	})
+	token, err := auth.Issue(user.ID.String())
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		userResponse
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}{userResponse{ID: user.ID, Name: user.Name, Email: user.Email}, token, 3600})
 }
 
 func (h *UserHandler) GetByID(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +94,15 @@ func (h *UserHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	subject, authErr := auth.Subject(r)
+	if authErr != nil {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if subject != id.String() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	user, err := h.service.GetByID(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {

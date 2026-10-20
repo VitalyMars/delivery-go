@@ -5,6 +5,7 @@ import (
 	"time"
 
 	catalogv1 "github.com/VitalyMars/delivery_go/gen/catalog/v1"
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"google.golang.org/grpc"
 )
 
@@ -14,7 +15,7 @@ type Client struct {
 }
 
 func NewClient(address string) (*Client, error) {
-	conn, err := grpc.NewClient(address, grpc.WithInsecure())
+	conn, err := grpc.NewClient(address, grpc.WithInsecure(), grpc.WithUnaryInterceptor(transport.InternalClient))
 	if err != nil {
 		return nil, err
 	}

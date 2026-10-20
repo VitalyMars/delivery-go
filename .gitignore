@@ -26,3 +26,9 @@ Thumbs.db
 
 # Local test artifacts
 kafka_check.txt
+
+# Local study documentation; only the root README is published.
+*.md
+!/README.md
+/docs/
+/scripts/update-guide-index.cjs

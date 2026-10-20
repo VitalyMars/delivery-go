@@ -70,13 +70,16 @@ func (s *Server) ValidateItems(
 		return nil, status.Error(codes.Internal, "failed to get restaurant")
 	}
 
+	if len(req.GetItems()) == 0 || len(req.GetItems()) > 100 {
+		return nil, status.Error(codes.InvalidArgument, "items must contain 1..100 entries")
+	}
 	response := &v1.ValidateItemsResponse{
 		Valid: true,
 		Items: make([]*v1.ValidatedItem, 0, len(req.GetItems())),
 	}
 
 	for _, item := range req.GetItems() {
-		if item.GetQuantity() <= 0 {
+		if item.GetQuantity() <= 0 || item.GetQuantity() > 1000 {
 			return nil, status.Error(codes.InvalidArgument, "quantity must be greater than zero")
 		}
 
@@ -100,6 +103,9 @@ func (s *Server) ValidateItems(
 
 		if !dish.Available {
 			return nil, status.Error(codes.InvalidArgument, "dish is unavailable")
+		}
+		if dish.Price < 0 || int64(dish.Price) > 2147483647 {
+			return nil, status.Error(codes.Internal, "invalid catalog price")
 		}
 
 		response.Items = append(response.Items, &v1.ValidatedItem{

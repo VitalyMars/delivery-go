@@ -6,10 +6,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"github.com/VitalyMars/delivery_go/services/notification/internal/config"
+	"github.com/VitalyMars/delivery_go/services/notification/internal/email"
+	"github.com/VitalyMars/delivery_go/services/notification/internal/kafka"
+	"github.com/VitalyMars/delivery_go/services/notification/internal/repository"
+	"github.com/VitalyMars/delivery_go/services/notification/internal/service"
+	userclient "github.com/VitalyMars/delivery_go/services/notification/internal/userClient"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -20,23 +27,69 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
+	if err := transport.ValidateInternalKey(); err != nil {
+		log.Fatal(err)
+	}
+	var workers sync.WaitGroup
 
 	cfg := config.Load()
 
-	db, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	startupCtx, cancelStartup := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStartup()
+	db, err := pgxpool.New(startupCtx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("create database pool: %v", err)
 	}
 	defer db.Close()
 
-	if err := db.Ping(ctx); err != nil {
+	if err := db.Ping(startupCtx); err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
 	log.Println("Notification Service: database connected")
 
+	notificationRepository := repository.NewNotificationRepository(db)
+
+	emailSender := email.NewSender(
+		cfg.SMTPHost,
+		cfg.SMTPPort,
+		cfg.SMTPFrom,
+	)
+
+	notificationService := service.NewNotificationService(
+		notificationRepository,
+		emailSender,
+	)
+
+	userServiceClient, err := userclient.New(cfg.UserServiceGRPCAddress)
+	if err != nil {
+		log.Fatalf("create User Service gRPC client: %v", err)
+	}
+	defer userServiceClient.Close()
+
+	consumer, err := kafka.NewConsumer(
+		cfg.KafkaBrokers,
+		cfg.KafkaGroupID,
+		cfg.KafkaTopic,
+		notificationService,
+		userServiceClient,
+	)
+	if err != nil {
+		log.Fatalf("create Kafka consumer: %v", err)
+	}
+
+	workers.Go(func() {
+		if err := consumer.Run(ctx); err != nil {
+			log.Printf("consumer stopped: %v", err)
+			stop()
+		}
+	})
+	workers.Go(func() { notificationService.Run(ctx) })
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		if err := db.Ping(r.Context()); err != nil {
+		pingCtx, cancelPing := context.WithTimeout(r.Context(), time.Second)
+		defer cancelPing()
+		if err := db.Ping(pingCtx); err != nil {
 			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -45,11 +98,7 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	server := &http.Server{
-		Addr:              cfg.HTTPAddress,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	server := transport.Server(cfg.HTTPAddress, mux)
 
 	go func() {
 		log.Printf("Notification Service HTTP listening on %s", cfg.HTTPAddress)
@@ -66,5 +115,8 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP shutdown error: %v", err)
+		_ = server.Close()
 	}
+	workers.Wait()
+
 }

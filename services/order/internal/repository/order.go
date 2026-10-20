@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/VitalyMars/delivery_go/services/order/internal/event"
+	"github.com/VitalyMars/delivery_go/services/order/internal/servicepolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,6 +24,7 @@ type Order struct {
 	Comment         string
 	Status          string
 	Total           int
+	RequestHash     string
 	IdempotencyKey  string
 	PaymentStatus   string
 	PaymentID       *uuid.UUID
@@ -85,10 +87,10 @@ func (r *OrderRepository) CreateOrder(
 			comment,
 			status,
 			total,
-			idempotency_key
+			idempotency_key, request_hash
 		)
 		VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		)
 		`,
 		order.ID,
@@ -101,7 +103,7 @@ func (r *OrderRepository) CreateOrder(
 		order.Comment,
 		order.Status,
 		order.Total,
-		order.IdempotencyKey,
+		order.IdempotencyKey, order.RequestHash,
 	)
 
 	if err != nil {
@@ -190,7 +192,7 @@ func (r *OrderRepository) GetOrderByIdempotencyKey(
 			comment,
 			status,
 			total,
-			idempotency_key,
+			idempotency_key, COALESCE(request_hash, ''),
 			payment_status,
 			payment_id,
 			created_at,
@@ -210,7 +212,7 @@ func (r *OrderRepository) GetOrderByIdempotencyKey(
 		&order.Comment,
 		&order.Status,
 		&order.Total,
-		&order.IdempotencyKey,
+		&order.IdempotencyKey, &order.RequestHash,
 		&order.PaymentStatus,
 		&order.PaymentID,
 		&order.CreatedAt,
@@ -245,7 +247,7 @@ func (r *OrderRepository) GetOrderByIDAndToken(
 			comment,
 			status,
 			total,
-			idempotency_key,
+			idempotency_key, COALESCE(request_hash, ''),
     		payment_status,
     		payment_id,			
 			created_at,
@@ -266,7 +268,7 @@ func (r *OrderRepository) GetOrderByIDAndToken(
 		&order.Comment,
 		&order.Status,
 		&order.Total,
-		&order.IdempotencyKey,
+		&order.IdempotencyKey, &order.RequestHash,
 		&order.PaymentStatus,
 		&order.PaymentID,
 		&order.CreatedAt,
@@ -345,7 +347,7 @@ func (r *OrderRepository) GetOrderByID(
 		`
 		SELECT
 			id,
-			user_id
+			user_id,
 			restaurant_id,
 			token,
 			customer_name,
@@ -354,7 +356,7 @@ func (r *OrderRepository) GetOrderByID(
 			comment,
 			status,
 			total,
-			idempotency_key,
+			idempotency_key, COALESCE(request_hash, ''),
 			payment_status,
 			payment_id,			
 			created_at,
@@ -374,7 +376,7 @@ func (r *OrderRepository) GetOrderByID(
 		&order.Comment,
 		&order.Status,
 		&order.Total,
-		&order.IdempotencyKey,
+		&order.IdempotencyKey, &order.RequestHash,
 		&order.PaymentStatus,
 		&order.PaymentID,
 		&order.CreatedAt,
@@ -436,7 +438,7 @@ func (r *OrderRepository) PayForTheOrder(
 
 	_, err = tx.Exec(ctx, `
     UPDATE orders
-    SET payment_status = 'PAID',
+    SET payment_status = 'PAID', status = 'ready_for_delivery',
         payment_id = $1,
         updated_at = NOW()
     WHERE id = $2
@@ -535,6 +537,9 @@ func (r *OrderRepository) PayForTheOrder(
 		TotalAmount: total,
 	}
 
+	if _, err := tx.Exec(ctx, "INSERT INTO order_status_history (id,order_id,status,reason) VALUES ($1,$2,'ready_for_delivery','Demo payment confirmed')", uuid.New(), orderID); err != nil {
+		return err
+	}
 	outboxEvent, err := createPaymentEvent(readyEvent)
 	if err != nil {
 		return err
@@ -547,9 +552,9 @@ func (r *OrderRepository) PayForTheOrder(
 	return tx.Commit(ctx)
 }
 
-func (r *OrderRepository) MarkCourierAssigned(
+func (r *OrderRepository) ApplyDeliveryStatus(
 	ctx context.Context,
-	orderID uuid.UUID,
+	orderID uuid.UUID, target string,
 ) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -572,21 +577,23 @@ func (r *OrderRepository) MarkCourierAssigned(
 		return err
 	}
 
-	// Повторное событие: статус уже обновлён.
-	if currentStatus == "courier_assigned" {
+	if target != "courier_assigned" && target != "delivered" {
+		return errors.New("invalid delivery status")
+	}
+	// Different topics can arrive out of order; completion implies assignment.
+	if currentStatus == target || currentStatus == "delivered" || (currentStatus == "delivering" && target == "courier_assigned") {
 		return tx.Commit(ctx)
 	}
-
-	if currentStatus != "created" {
-		return tx.Commit(ctx)
+	if !(target == "delivered" && currentStatus == "ready_for_delivery") && !servicepolicy.CanChangeStatus(currentStatus, target) {
+		return errors.New("invalid order status transition")
 	}
 
 	_, err = tx.Exec(ctx, `
 		UPDATE orders
-		SET status = 'courier_assigned',
+		SET status = $2,
 		    updated_at = NOW()
 		WHERE id = $1
-	`, orderID)
+	`, orderID, target)
 	if err != nil {
 		return err
 	}
@@ -594,7 +601,7 @@ func (r *OrderRepository) MarkCourierAssigned(
 	_, err = tx.Exec(ctx, `
 		INSERT INTO order_status_history (id, order_id, status, reason)
 		VALUES ($1, $2, $3, $4)
-	`, uuid.New(), orderID, "courier_assigned", "Courier assigned")
+	`, uuid.New(), orderID, target, "Delivery event")
 	if err != nil {
 		return err
 	}

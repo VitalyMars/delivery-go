@@ -14,6 +14,7 @@ var ErrNotFound = errors.New("notification not found")
 
 type Notification struct {
 	ID             uuid.UUID
+	EventID        string
 	UserID         uuid.UUID
 	OrderID        uuid.UUID
 	RecipientEmail string
@@ -37,19 +38,22 @@ func NewNotificationRepository(db *pgxpool.Pool) *NotificationRepository {
 func (r *NotificationRepository) Create(
 	ctx context.Context,
 	n *Notification,
-) error {
+) (bool, error) {
 	const query = `
-		INSERT INTO notifications (
-			id, user_id, order_id, recipient_email,
-			subject, body, status, attempts
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`
+        INSERT INTO notifications (
+            id, event_id, user_id, order_id, recipient_email,
+            subject, body, status, attempts
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (event_id) WHERE event_id IS NOT NULL
+        DO NOTHING
+    `
 
-	_, err := r.db.Exec(
+	tag, err := r.db.Exec(
 		ctx,
 		query,
 		n.ID,
+		n.EventID,
 		n.UserID,
 		n.OrderID,
 		n.RecipientEmail,
@@ -58,53 +62,11 @@ func (r *NotificationRepository) Create(
 		n.Status,
 		n.Attempts,
 	)
-	return err
-}
-
-func (r *NotificationRepository) MarkSent(
-	ctx context.Context,
-	id uuid.UUID,
-) error {
-	const query = `
-		UPDATE notifications
-		SET status = 'sent',
-			sent_at = NOW(),
-			last_error = NULL
-		WHERE id = $1
-	`
-
-	tag, err := r.db.Exec(ctx, query, id)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
 
-func (r *NotificationRepository) MarkFailed(
-	ctx context.Context,
-	id uuid.UUID,
-	attempts int,
-	lastError string,
-) error {
-	const query = `
-		UPDATE notifications
-		SET status = 'failed',
-			attempts = $2,
-			last_error = $3
-		WHERE id = $1
-	`
-
-	tag, err := r.db.Exec(ctx, query, id, attempts, lastError)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
 func (r *NotificationRepository) GetByID(
@@ -112,17 +74,18 @@ func (r *NotificationRepository) GetByID(
 	id uuid.UUID,
 ) (*Notification, error) {
 	const query = `
-		SELECT
-			id, user_id, order_id, recipient_email,
-			subject, body, status, attempts,
-			last_error, created_at, sent_at
-		FROM notifications
-		WHERE id = $1
+SELECT
+    id, event_id, user_id, order_id, recipient_email,
+    subject, body, status, attempts,
+    last_error, created_at, sent_at
+FROM notifications
+WHERE id = $1
 	`
 
 	n := &Notification{}
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&n.ID,
+		&n.EventID,
 		&n.UserID,
 		&n.OrderID,
 		&n.RecipientEmail,
@@ -142,4 +105,39 @@ func (r *NotificationRepository) GetByID(
 	}
 
 	return n, nil
+}
+
+// DeliverNext locks one due notification throughout its bounded SMTP attempt.
+// A crashed worker releases the lock by rolling back, making the task eligible again.
+func (r *NotificationRepository) DeliverNext(ctx context.Context, send func(context.Context, string, string, string) error) (bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.Background())
+	var n Notification
+	err = tx.QueryRow(ctx, `SELECT id,recipient_email,subject,body,attempts FROM notifications
+ WHERE status IN ('pending','failed') AND attempts < 10 AND next_attempt_at <= now()
+ ORDER BY next_attempt_at,created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&n.ID, &n.RecipientEmail, &n.Subject, &n.Body, &n.Attempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	sendErr := send(ctx, n.RecipientEmail, n.Subject, n.Body)
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	n.Attempts++
+	if sendErr == nil {
+		_, err = tx.Exec(ctx, "UPDATE notifications SET status='sent',sent_at=now(),last_error=NULL,attempts=$2 WHERE id=$1", n.ID, n.Attempts)
+	} else {
+		delay := time.Second * time.Duration(1<<min(n.Attempts, 10))
+		_, err = tx.Exec(ctx, "UPDATE notifications SET status='failed',last_error=$2,attempts=$3,next_attempt_at=$4 WHERE id=$1", n.ID, sendErr.Error(), n.Attempts, time.Now().Add(delay))
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
 }

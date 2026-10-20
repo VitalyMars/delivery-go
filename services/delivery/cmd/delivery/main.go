@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"github.com/VitalyMars/delivery_go/services/delivery/internal/config"
 	"github.com/VitalyMars/delivery_go/services/delivery/internal/kafka"
 	"github.com/VitalyMars/delivery_go/services/delivery/internal/repository"
@@ -28,6 +30,10 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
+	if err := transport.ValidateInternalKey(); err != nil {
+		log.Fatal(err)
+	}
+	var workers sync.WaitGroup
 
 	dbCtx, cancelDB := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelDB()
@@ -42,7 +48,7 @@ func main() {
 
 	// Восстанавливаем очередь после запуска сервиса.
 	// Восстанавливаем очередь при запуске и затем проверяем её каждые 5 секунд.
-	go func() {
+	workers.Go(func() {
 		processQueue(ctx, deliveryRepo)
 
 		ticker := time.NewTicker(5 * time.Second)
@@ -56,7 +62,7 @@ func main() {
 				processQueue(ctx, deliveryRepo)
 			}
 		}
-	}()
+	})
 
 	outboxRepo := repository.NewOutboxRepository(pool)
 
@@ -67,7 +73,7 @@ func main() {
 	defer producer.Close()
 
 	publisher := kafka.NewOutboxPublisher(outboxRepo, producer)
-	go publisher.Run(ctx)
+	workers.Go(func() { publisher.Run(ctx) })
 
 	consumer, err := kafka.NewConsumer(
 		cfg.KafkaBrokers,
@@ -79,11 +85,20 @@ func main() {
 		log.Fatalf("create Kafka consumer: %v", err)
 	}
 
-	go consumer.Run(ctx)
+	workers.Go(func() {
+		if err := consumer.Run(ctx); err != nil {
+			log.Printf("consumer stopped: %v", err)
+			stop()
+		}
+	})
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /deliveries/{id}/complete", func(w http.ResponseWriter, r *http.Request) {
+		if !transport.InternalKeyOK(r.Header.Get("X-Internal-API-Key")) {
+			http.Error(w, "service authentication required", http.StatusUnauthorized)
+			return
+		}
 		deliveryID, err := uuid.Parse(r.PathValue("id"))
 		if err != nil {
 			http.Error(w, "invalid delivery ID", http.StatusBadRequest)
@@ -112,15 +127,17 @@ func main() {
 	})
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		pingCtx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := pool.Ping(pingCtx); err != nil {
+			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	server := &http.Server{
-		Addr:              cfg.HTTPAddress,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	server := transport.Server(cfg.HTTPAddress, mux)
 
 	go func() {
 		log.Printf("Delivery Service health endpoint listening on %s", cfg.HTTPAddress)
@@ -142,7 +159,9 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("health server shutdown error: %v", err)
+		_ = server.Close()
 	}
+	workers.Wait()
 }
 
 func processQueue(ctx context.Context, repo *repository.DeliveryRepository) {

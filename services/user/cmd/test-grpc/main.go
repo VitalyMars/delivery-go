@@ -6,14 +6,20 @@ import (
 	"time"
 
 	userv1 "github.com/VitalyMars/delivery_go/gen/user/v1"
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
+	userID := transport.Env("USER_ID", "")
+	if userID == "" {
+		log.Fatal("USER_ID is required")
+	}
 	conn, err := grpc.NewClient(
 		"127.0.0.1:9094",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(transport.InternalClient),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -36,7 +42,7 @@ func main() {
 	client := userv1.NewUserServiceClient(conn)
 
 	user, err := client.GetUserByID(ctx, &userv1.GetUserByIDRequest{
-		UserId: "bd01d3dd-9c6a-4f00-a1d6-8d03d0d69d8c",
+		UserId: userID,
 	})
 	if err != nil {
 		log.Fatalf("GetUserByID failed: %v", err)

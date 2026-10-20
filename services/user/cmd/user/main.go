@@ -11,13 +11,14 @@ import (
 	"time"
 
 	userv1 "github.com/VitalyMars/delivery_go/gen/user/v1"
-	usergrpc "github.com/VitalyMars/delivery_go/services/user/internal/grpc"
-	"google.golang.org/grpc"
-
+	"github.com/VitalyMars/delivery_go/pkg/auth"
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"github.com/VitalyMars/delivery_go/services/user/internal/config"
+	usergrpc "github.com/VitalyMars/delivery_go/services/user/internal/grpc"
 	"github.com/VitalyMars/delivery_go/services/user/internal/handler"
 	"github.com/VitalyMars/delivery_go/services/user/internal/repository"
 	"github.com/VitalyMars/delivery_go/services/user/internal/service"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -27,14 +28,22 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
+	if err := transport.ValidateInternalKey(); err != nil {
+		log.Fatal(err)
+	}
+	if err := auth.ValidateConfig(); err != nil {
+		log.Fatal(err)
+	}
 
-	db, err := config.NewDB(ctx)
+	startupCtx, cancelStartup := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStartup()
+	db, err := config.NewDB(startupCtx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	if err := db.Ping(ctx); err != nil {
+	if err := db.Ping(startupCtx); err != nil {
 		log.Fatal(err)
 	}
 	log.Println("User Service: database connected")
@@ -44,11 +53,11 @@ func main() {
 	userHandler := handler.NewUserHandler(userService)
 
 	// gRPC server
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(transport.InternalServer))
 	userGRPCHandler := usergrpc.NewServer(userService)
 	userv1.RegisterUserServiceServer(grpcServer, userGRPCHandler)
 
-	grpcListener, err := net.Listen("tcp", ":9094")
+	grpcListener, err := net.Listen("tcp", transport.Env("GRPC_ADDRESS", ":9094"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -61,11 +70,7 @@ func main() {
 		}
 	}()
 
-	server := &http.Server{
-		Addr:              ":8083",
-		Handler:           handler.NewRouter(userHandler),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	server := transport.Server(transport.Env("HTTP_ADDRESS", ":8083"), handler.NewRouter(userHandler))
 
 	go func() {
 		log.Println("User Service HTTP listening on :8083")
@@ -82,7 +87,9 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP shutdown error: %v", err)
+		_ = server.Close()
 	}
 
-	grpcServer.GracefulStop()
+	transport.StopGRPC(grpcServer)
+
 }

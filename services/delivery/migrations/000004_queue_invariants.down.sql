@@ -1,0 +1,2 @@
+DROP INDEX idx_deliveries_waiting_fifo;
+DROP INDEX idx_deliveries_active_courier;

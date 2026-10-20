@@ -7,10 +7,15 @@ import (
 	"net/http"
 
 	catalogv1 "github.com/VitalyMars/delivery_go/gen/catalog/v1"
+	"github.com/VitalyMars/delivery_go/pkg/auth"
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"github.com/VitalyMars/delivery_go/services/order/internal/repository"
 	"github.com/VitalyMars/delivery_go/services/order/internal/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type OrderHandler struct {
@@ -73,12 +78,10 @@ type PayForTheOrderResponse struct {
 func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	var req CreateOrderRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := transport.Decode(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	log.Printf("decoded request: %+v", req)
 
 	items := make([]*catalogv1.OrderItem, 0, len(req.Items))
 
@@ -89,18 +92,41 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	for _, item := range items {
-		log.Printf(
-			"handler item: dish_id=%q quantity=%d",
-			item.GetDishId(),
-			item.GetQuantity(),
-		)
+	scope := ""
+	if r.Header.Get("Authorization") != "" {
+		subject, err := auth.Subject(r)
+		if err != nil {
+			http.Error(w, "invalid session", http.StatusUnauthorized)
+			return
+		}
+		id, err := uuid.Parse(subject)
+		if err != nil {
+			http.Error(w, "invalid session", http.StatusUnauthorized)
+			return
+		}
+		if req.UserID != nil && *req.UserID != id {
+			http.Error(w, "user_id does not match session", http.StatusForbidden)
+			return
+		}
+		req.UserID = &id
+		scope = "user:" + id.String()
+	} else {
+		if req.UserID != nil {
+			http.Error(w, "session required for user_id", http.StatusUnauthorized)
+			return
+		}
+		checkout, err := uuid.Parse(r.Header.Get("X-Checkout-Token"))
+		if err != nil || checkout == uuid.Nil {
+			http.Error(w, "X-Checkout-Token must be a random UUID", http.StatusBadRequest)
+			return
+		}
+		scope = "guest:" + checkout.String()
 	}
-
 	order, err := h.service.CreateOrder(
 		r.Context(),
 		service.CreateOrderInput{
 			UserID:          req.UserID,
+			ClientScope:     scope,
 			CustomerName:    req.CustomerName,
 			CustomerPhone:   req.CustomerPhone,
 			DeliveryAddress: req.DeliveryAddress,
@@ -113,7 +139,21 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Printf("create order error: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		switch {
+		case errors.Is(err, service.ErrInvalidInput):
+			http.Error(w, "invalid order input", http.StatusBadRequest)
+		case errors.Is(err, service.ErrIdempotencyConflict):
+			http.Error(w, "idempotency key was used for another request", http.StatusConflict)
+		default:
+			switch status.Code(err) {
+			case codes.InvalidArgument, codes.NotFound:
+				http.Error(w, "invalid restaurant or items", http.StatusBadRequest)
+			case codes.Unavailable, codes.DeadlineExceeded:
+				http.Error(w, "catalog unavailable", http.StatusServiceUnavailable)
+			default:
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}
 		return
 	}
 
@@ -136,7 +176,7 @@ func (h *OrderHandler) GetOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := uuid.Parse(r.URL.Query().Get("token"))
+	token, err := uuid.Parse(r.Header.Get("X-Order-Token"))
 	if err != nil {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
@@ -149,7 +189,11 @@ func (h *OrderHandler) GetOrder(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Printf("get order error: %v", err)
-		http.Error(w, "order not found", http.StatusNotFound)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "order not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -187,6 +231,10 @@ func (h *OrderHandler) GetOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *OrderHandler) PayForTheOrder(w http.ResponseWriter, r *http.Request) {
+	if transport.Env("DEMO_PAYMENTS", "false") != "true" {
+		http.Error(w, "demo payments disabled", http.StatusNotImplemented)
+		return
+	}
 
 	orderID, err := uuid.Parse(chi.URLParam(r, "orderId"))
 	if err != nil {
@@ -194,7 +242,7 @@ func (h *OrderHandler) PayForTheOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := uuid.Parse(r.URL.Query().Get("token"))
+	token, err := uuid.Parse(r.Header.Get("X-Order-Token"))
 	if err != nil {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return

@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+!.env.example
+*.exe
+*.log
+*.out
+.cache
+docs
+scripts/update-guide-index.cjs

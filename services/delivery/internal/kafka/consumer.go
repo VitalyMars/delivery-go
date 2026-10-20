@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 
+	"github.com/VitalyMars/delivery_go/pkg/kafkaconsumer"
 	"github.com/VitalyMars/delivery_go/services/delivery/internal/event"
 	"github.com/VitalyMars/delivery_go/services/delivery/internal/repository"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -26,7 +27,9 @@ func NewConsumer(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(groupID),
 		kgo.ConsumeTopics(topic),
-		kgo.ConsumeStartOffset(kgo.NewOffset().AtEnd()),
+		kgo.DisableAutoCommit(),
+		kgo.BlockRebalanceOnPoll(),
+		kgo.ConsumeStartOffset(kgo.NewOffset().AtStart()),
 	)
 	if err != nil {
 		return nil, err
@@ -38,66 +41,8 @@ func NewConsumer(
 	}, nil
 }
 
-func (c *Consumer) Run(ctx context.Context) {
-	defer c.client.Close()
-
-	log.Println("Kafka consumer started")
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		fetches := c.client.PollFetches(ctx)
-		if ctx.Err() != nil {
-			return
-		}
-
-		fetches.EachError(func(topic string, partition int32, err error) {
-			log.Printf(
-				"Kafka fetch error: topic=%s partition=%d: %v",
-				topic, partition, err,
-			)
-		})
-
-		// Each partition is processed independently.
-		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
-			if p.Err != nil {
-				return
-			}
-
-			for _, record := range p.Records {
-				if ctx.Err() != nil {
-					return
-				}
-
-				if err := c.processRecord(ctx, record); err != nil {
-					log.Printf(
-						"Failed to process event at %s[%d] offset %d: %v",
-						record.Topic,
-						record.Partition,
-						record.Offset,
-						err,
-					)
-
-					// Do not process or commit later records
-					// from this partition in this batch.
-					return
-				}
-
-				if err := c.client.CommitRecords(ctx, record); err != nil {
-					log.Printf(
-						"Failed to commit Kafka offset at %s[%d] offset %d: %v",
-						record.Topic,
-						record.Partition,
-						record.Offset,
-						err,
-					)
-					return
-				}
-			}
-		})
-	}
+func (c *Consumer) Run(ctx context.Context) error {
+	return kafkaconsumer.Run(ctx, c.client, c.processRecord)
 }
 
 func (c *Consumer) processRecord(
@@ -106,9 +51,12 @@ func (c *Consumer) processRecord(
 ) error {
 	var e event.OrderReadyForDelivery
 	if err := json.Unmarshal(record.Value, &e); err != nil {
-		return errors.New("invalid order event JSON: " + err.Error())
+		return kafkaconsumer.Permanent(errors.New("invalid order event JSON: " + err.Error()))
 	}
 
+	if err := e.Validate(); err != nil {
+		return kafkaconsumer.Permanent(err)
+	}
 	delivery, err := c.repo.CreateFromOrderEvent(ctx, e)
 	if err != nil {
 		return err

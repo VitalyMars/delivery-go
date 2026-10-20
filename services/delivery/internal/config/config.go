@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 )
 
 type Config struct {
@@ -17,11 +19,6 @@ func Load() (Config, error) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		databaseURL = "postgres://app:catalog@localhost:5433/delivery_db?sslmode=disable"
-	}
-
-	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
-	if kafkaBrokers == "" {
-		kafkaBrokers = "localhost:9092"
 	}
 
 	kafkaTopic := os.Getenv("KAFKA_TOPIC")
@@ -45,7 +42,7 @@ func Load() (Config, error) {
 
 	return Config{
 		DatabaseURL:  databaseURL,
-		KafkaBrokers: []string{kafkaBrokers},
+		KafkaBrokers: transport.Brokers(),
 		KafkaTopic:   kafkaTopic,
 		KafkaGroupID: kafkaGroupID,
 		HTTPAddress:  httpAddress,

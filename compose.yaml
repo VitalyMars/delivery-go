@@ -10,7 +10,7 @@ services:
       POSTGRES_DB: catalog_db
 
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
 
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -20,7 +20,7 @@ services:
     container_name: delivery-kafka
 
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
 
     environment:
       KAFKA_NODE_ID: 1
@@ -40,6 +40,13 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: delivery-mailpit
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
 
 volumes:
   postgres_data:

@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/mail"
 	"strings"
 
 	"github.com/VitalyMars/delivery_go/services/user/internal/repository"
@@ -11,7 +13,7 @@ import (
 )
 
 var ErrInvalidCredentials = errors.New("invalid email or password")
-var ErrInvalidInput = errors.New("name, email and password are required")
+var ErrInvalidInput = errors.New("invalid registration input")
 
 type UserService struct {
 	repo *repository.UserRepository
@@ -40,8 +42,12 @@ func (s *UserService) Register(
 		return PublicUser{}, ErrInvalidInput
 	}
 
-	if len(password) < 8 {
-		return PublicUser{}, errors.New("password must contain at least 8 characters")
+	if len(password) < 8 || len(password) > 72 || len(name) > 100 || len(email) > 254 {
+		return PublicUser{}, fmt.Errorf("%w: name <= 100 bytes, email <= 254 bytes, password 8..72 bytes", ErrInvalidInput)
+	}
+	address, err := mail.ParseAddress(email)
+	if err != nil || address.Address != email {
+		return PublicUser{}, ErrInvalidInput
 	}
 
 	hash, err := bcrypt.GenerateFromPassword(
@@ -103,6 +109,7 @@ func (s *UserService) GetByID(
 	ctx context.Context,
 	id uuid.UUID,
 ) (PublicUser, error) {
+
 	user, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return PublicUser{}, err

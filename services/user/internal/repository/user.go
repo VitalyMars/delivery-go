@@ -5,7 +5,8 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -45,7 +46,7 @@ func (r *UserRepository) Create(
 		user.PasswordHash,
 	)
 	if err != nil {
-		var pgErr *pgx.PgError
+		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ErrEmailExists
 		}

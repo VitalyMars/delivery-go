@@ -7,6 +7,7 @@ import (
 	"time"
 
 	orderv1 "github.com/VitalyMars/delivery_go/gen/order/v1"
+	"github.com/VitalyMars/delivery_go/pkg/transport"
 	"google.golang.org/grpc"
 )
 
@@ -14,6 +15,7 @@ func main() {
 	conn, err := grpc.NewClient(
 		"127.0.0.1:9091",
 		grpc.WithInsecure(),
+		grpc.WithUnaryInterceptor(transport.InternalClient),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -25,25 +27,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	orderID := "6854de01-e84d-4ac1-9f1c-775b0b80b96d"
-
-	fmt.Println("Changing order status to ready_for_delivery...")
-
-	changeResponse, err := client.ChangeOrderStatus(
-		ctx,
-		&orderv1.ChangeOrderStatusRequest{
-			OrderId: orderID,
-			Status:  "ready_for_delivery",
-			Reason:  "order prepared",
-		},
-	)
-	if err != nil {
-		log.Fatal(err)
+	orderID := transport.Env("ORDER_ID", "")
+	if orderID == "" {
+		log.Fatal("ORDER_ID is required")
 	}
 
-	fmt.Printf("Ready for delivery: %v\n", changeResponse.GetSuccess())
-
-	fmt.Println()
 	fmt.Println("Getting order...")
 
 	response, err := client.GetOrder(

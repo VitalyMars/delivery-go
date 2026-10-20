@@ -2,7 +2,6 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"time"
 
@@ -49,41 +48,7 @@ func (p *OutboxPublisher) Run(ctx context.Context) {
 }
 
 func (p *OutboxPublisher) PublishBatch(ctx context.Context) error {
-	events, err := p.repository.GetUnpublished(ctx, outboxBatchSize)
-	if err != nil {
-		return err
-	}
-
-	for _, event := range events {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		if err := p.producer.Publish(
-			ctx,
-			event.EventType,
-			event.AggregateID.String(),
-			json.RawMessage(event.Payload),
-		); err != nil {
-			log.Printf("failed to publish outbox event %s: %v", event.ID, err)
-			continue
-		}
-
-		if err := p.repository.MarkPublished(ctx, event.ID); err != nil {
-			log.Printf(
-				"event %s sent to Kafka but could not be marked published: %v",
-				event.ID,
-				err,
-			)
-			continue
-		}
-
-		log.Printf(
-			"delivery outbox event published: id=%s type=%s",
-			event.ID,
-			event.EventType,
-		)
-	}
-
-	return nil
+	batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return p.repository.PublishBatch(batchCtx, p.producer.Publish)
 }

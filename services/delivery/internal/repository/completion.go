@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -45,7 +46,7 @@ func (r *DeliveryRepository) CompleteDelivery(
 	}
 
 	if status == "delivered" {
-		return ErrDeliveryAlreadyDone
+		return tx.Commit(ctx)
 	}
 	if status != "courier_assigned" && status != "delivering" {
 		return ErrDeliveryCannotComplete
@@ -84,6 +85,23 @@ func (r *DeliveryRepository) CompleteDelivery(
 		return fmt.Errorf("release courier: %w", err)
 	}
 
+	var orderID uuid.UUID
+	if err := tx.QueryRow(ctx, "SELECT order_id FROM deliveries WHERE id=$1", deliveryID).Scan(&orderID); err != nil {
+		return err
+	}
+	eventID := uuid.New()
+	payload, err := json.Marshal(struct {
+		EventID    string `json:"event_id"`
+		EventType  string `json:"event_type"`
+		OrderID    string `json:"order_id"`
+		DeliveryID string `json:"delivery_id"`
+	}{eventID.String(), "delivery.completed", orderID.String(), deliveryID.String()})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO outbox_events (id,aggregate_id,event_type,payload) VALUES ($1,$2,$3,$4)", eventID, orderID, "delivery.completed", payload); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit completion transaction: %w", err)
 	}
