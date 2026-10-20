@@ -1,23 +1,74 @@
 # Delivery Go
 
-Сервис доставки еды: Go, PostgreSQL, gRPC, Kafka, transactional outbox и отправка уведомлений через Mailpit.
+Микросервисный backend сервиса доставки еды на Go.
 
-## Быстрый запуск
+Проект включает регистрацию пользователей, каталог ресторанов и блюд, оформление заказов, назначение курьеров и email-уведомления.
 
-Нужен запущенный Docker Engine с Docker Compose. Команды выполняются из корня репозитория.
+## Стек
+
+Go, Chi, PostgreSQL, pgx, Kafka, gRPC, Protocol Buffers, Docker Compose, GitHub Actions.
+
+## Сервисы
+
+| Сервис | Назначение |
+|---|---|
+| User | Регистрация, вход и получение профиля |
+| Catalog | Рестораны, меню, цены и доступность блюд |
+| Order | Создание заказов, проверка позиций и управление статусами |
+| Delivery | Очередь доставок и назначение курьеров |
+| Notification | Отправка email-уведомлений и повторные попытки при ошибках |
+
+Синхронное взаимодействие между сервисами организовано через gRPC, асинхронное — через Kafka. Каждый сервис использует отдельную базу PostgreSQL.
+
+## Основные возможности
+
+- Авторизация пользователей с помощью подписанных токенов.
+- Проверка цен и доступности блюд через Catalog перед созданием заказа.
+- Сохранение снимка позиций заказа.
+- Идемпотентное создание заказов.
+- Публикация событий через transactional outbox.
+- Обработка Kafka-событий с ручным подтверждением, повторными попытками и DLQ.
+- Назначение курьеров с блокировками PostgreSQL.
+- Фоновая отправка email-уведомлений.
+- SQL-миграции, unit-тесты и интеграционные тесты репозиториев PostgreSQL.
+
+## Запуск
+
+Для запуска необходимы Docker Engine и Docker Compose. Команды выполняются из корня проекта.
+
+Создание `.env` со случайными секретами:
 
 ```powershell
-# Один раз: создаёт .env со случайными секретами, существующий файл не перезаписывает.
 .\scripts\setup-env.ps1
+```
 
+Скрипт выполняется один раз и не перезаписывает существующий `.env`.
+
+Сборка и запуск:
+
+```powershell
 docker compose -f compose.yaml -f compose.local.yaml up --build -d
+```
+
+Проверка состояния:
+
+```powershell
 docker compose -f compose.yaml -f compose.local.yaml ps -a
+```
+
+Просмотр логов:
+
+```powershell
 docker compose -f compose.yaml -f compose.local.yaml logs -f order delivery notification
 ```
 
-`compose.yaml` оставлен для запуска одной инфраструктуры; `compose.local.yaml` добавляет приложения, создание БД, миграции и Kafka topics. При объединённом запуске внешние HTTP-порты приложений привязаны к localhost. Это локальная среда, Kafka и SMTP работают без production TLS/authentication.
+`compose.yaml` содержит PostgreSQL, Kafka и Mailpit. Файл `compose.local.yaml` добавляет приложения, применение миграций и создание Kafka topics.
 
-| Компонент | Адрес на хосте |
+Контейнеры `migrate` и `kafka-topics` завершаются с кодом `0` после выполнения своих задач.
+
+## Адреса
+
+| Компонент | Адрес |
 |---|---|
 | Catalog HTTP | http://localhost:8080 |
 | Order HTTP | http://localhost:8081 |
@@ -25,113 +76,158 @@ docker compose -f compose.yaml -f compose.local.yaml logs -f order delivery noti
 | User HTTP | http://localhost:8083 |
 | Notification health | http://localhost:8084/health |
 | Mailpit | http://localhost:8025 |
-| PostgreSQL | localhost:5433, `app` / `catalog` |
-| Kafka для программ на хосте | localhost:9092 |
+| PostgreSQL | localhost:5433 |
+| Kafka | localhost:9092 |
 
-Внутри Compose приложения используют `kafka:29092`, gRPC-адреса `catalog:9090` и `user:9094`.
+Локальные параметры PostgreSQL: пользователь `app`, пароль `catalog`.
 
-### Если БД уже существовала
+Внутри Docker-сети используются адреса `kafka:29092`, `catalog:9090` и `user:9094`.
 
-Не удаляй volume ради обновления. Новый migration runner ведёт историю в `app_schema_migrations`, сохраняя прежнюю `schema_migrations` без изменений. Чистая история golang-migrate (`version`, `dirty=false`) переносится автоматически. При `dirty=true` запуск останавливается до исправления незавершённой миграции. После перехода используй новый runner: старый инструмент больше не отражает новые версии.
+## Данные каталога
 
-Если таблицы созданы вручную и истории нет, runner откажется повторно применять начальные миграции.
-
-Проверь, какие SQL-миграции реально применены. Для каждого существующего сервиса зафиксируй **последнюю применённую** версию:
-
-```powershell
-# Пример: только если у Order уже применены миграции 1..8.
-$env:DATABASE_URL='postgres://app:catalog@localhost:5433/postgres?sslmode=disable'
-go run ./cmd/migrate -service order -baseline 8
-```
-
-Эта команда запишет историю 1..8 и применит последующие миграции. `-baseline` не проверяет соответствие существующих таблиц SQL-файлам: версию необходимо выбрать по фактической схеме. Аналогично обработай остальные существующие БД. После этого обычный запуск сможет продолжить работу. Для пустой новой БД baseline не нужен.
-
-При запуске мигратора внутри Compose используй `docker compose -f compose.yaml -f compose.local.yaml run --rm migrate -service order -baseline 8` с проверенными именем сервиса и версией.
-
-### Тестовые данные каталога
+Добавление демонстрационного ресторана и блюда:
 
 ```powershell
 Get-Content .\scripts\seed.sql | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U app -d catalog_db
 ```
 
-Миграции Delivery сохраняют прежнее поведение: создают трёх демонстрационных курьеров.
+Повторное выполнение не создаёт дубликаты. Начальная миграция Delivery добавляет трёх курьеров.
 
-## Пример заказа
+## API
 
-```powershell
-.\scripts\load-env.ps1
-$email = "student-$([guid]::NewGuid().ToString('N'))@example.com"
-$credentials = @{name='Student';email=$email;password='learning-password-123'} | ConvertTo-Json
-Invoke-RestMethod http://localhost:8083/users/register -Method Post -ContentType application/json -Body $credentials
-$session = Invoke-RestMethod http://localhost:8083/users/login -Method Post -ContentType application/json -Body $credentials
-$headers = @{Authorization="Bearer $($session.access_token)"}
-$body = @{
-    customer_name='Student'
-    customer_phone='+79990000000'
-    delivery_address='Demo street, 2'
-    idempotency_key=[guid]::NewGuid().ToString()
-    restaurant_id='11111111-1111-4111-8111-111111111111'
-    items=@(@{dish_id='22222222-2222-4222-8222-222222222222';quantity=1})
-} | ConvertTo-Json -Depth 4
-$order = Invoke-RestMethod http://localhost:8081/orders -Method Post -Headers $headers -ContentType application/json -Body $body
-$orderHeaders = @{'X-Order-Token'=$order.order_token}
-Invoke-RestMethod "http://localhost:8081/orders/$($order.order_id)/pay" -Method Post -Headers $orderHeaders
-Invoke-RestMethod "http://localhost:8081/orders/$($order.order_id)" -Headers $orderHeaders
+### Пользователи
+
+| Метод | Маршрут | Назначение |
+|---|---|---|
+| POST | `/users/register` | Регистрация |
+| POST | `/users/login` | Вход |
+| GET | `/users/{userID}` | Получение собственного профиля |
+
+После входа возвращается `access_token` со сроком действия один час. Он передаётся в заголовке:
+
+```http
+Authorization: Bearer <access_token>
 ```
 
-В `.env` учебного запуска включён `DEMO_PAYMENTS=true`. Endpoint оплаты имитирует подтверждение и не обращается к платёжной системе. При отсутствии этого флага он выключен.
+### Каталог
 
-После оплаты worker назначит курьера примерно в течение 5 секунд. Письмо появится в Mailpit. Для завершения доставки возьми её `id` из `delivery_db.deliveries` и отправь:
+| Метод | Маршрут | Назначение |
+|---|---|---|
+| GET | `/restaurants` | Список ресторанов |
+| GET | `/restaurants/{restaurantId}` | Информация о ресторане |
+| GET | `/restaurants/{restaurantId}/menu` | Меню ресторана |
+| GET | `/dishes/{dishId}` | Информация о блюде |
 
-```powershell
-# Подставь реальный UUID доставки.
-$deliveryId='REPLACE_WITH_DELIVERY_UUID'
-Invoke-RestMethod "http://localhost:8082/deliveries/$deliveryId/complete" -Method Post -Headers @{'X-Internal-API-Key'=$env:INTERNAL_API_KEY}
+### Заказы
+
+| Метод | Маршрут | Назначение |
+|---|---|---|
+| POST | `/orders` | Создание заказа |
+| GET | `/orders/{orderId}` | Получение заказа |
+| POST | `/orders/{orderId}/pay` | Подтверждение демонстрационной оплаты |
+
+Пример тела запроса создания заказа:
+
+```json
+{
+  "customer_name": "Test User",
+  "customer_phone": "+79990000000",
+  "delivery_address": "Тестовая улица, дом 10",
+  "comment": "",
+  "idempotency_key": "33333333-3333-4333-8333-333333333333",
+  "restaurant_id": "11111111-1111-4111-8111-111111111111",
+  "items": [
+    {
+      "dish_id": "22222222-2222-4222-8222-222222222222",
+      "quantity": 1
+    }
+  ]
+}
 ```
 
-Order получит `delivery.completed` асинхронно и обновит статус на `delivered`.
+Для зарегистрированного пользователя передаётся `Authorization: Bearer <access_token>`. Идентификатор пользователя определяется из сессии.
 
-## Изменения API
+Гостевой заказ создаётся без авторизации, со случайным UUID в заголовке `X-Checkout-Token`. При повторе запроса сохраняются тот же токен, тело и `idempotency_key`.
 
-- Login выдаёт `access_token` на один час. Профиль доступен только владельцу с `Authorization: Bearer ...`.
-- `user_id` заказа выводится из сессии; подмена значения в JSON запрещена.
-- Гостевой заказ требует случайный UUID в `X-Checkout-Token`. Сохраняй его для повторов своего checkout.
-- `idempotency_key` — обязательный непустой UUID. Для повтора сохраняй тело и идентификатор клиента; другое тело с тем же ключом вернёт 409.
-- Токен заказа передаётся в `X-Order-Token`. Query-параметры с токенами больше не используются.
-- Серверная корзина удалена: клиент хранит выбранные блюда и передаёт их в `items` запроса `POST /orders`. Order проверяет доступность и получает актуальные цены из Catalog.
-- gRPC и завершение доставки требуют `INTERNAL_API_KEY`. При работе через Go-клиенты ключ передаётся interceptor автоматически.
-- Неизвестные JSON-поля, несколько JSON-документов и тело свыше 1 MiB отклоняются.
+Для каждого нового заказа используется новый UUID в `idempotency_key`. Повтор исходного запроса возвращает ранее созданный заказ. Изменение тела с прежним ключом возвращает `409 Conflict`.
 
-Маршруты `/cart` и `/cart/items` больше не доступны. Исторические миграции и таблицы `carts`/`cart_items` сохранены для совместимости с существующей БД; приложение их больше не использует. Удаление этих данных при необходимости оформляется отдельной миграцией.
+Ответ содержит `order_id` и `order_token`. Получение и оплата заказа требуют заголовок:
 
-## Проверки
+```http
+X-Order-Token: <order_token>
+```
+
+Токен заказа передаётся именно в Headers, а не в query-параметрах URL.
+
+### Доставка
+
+```http
+POST /deliveries/{id}/complete
+X-Internal-API-Key: <INTERNAL_API_KEY>
+```
+
+Параметр `id` — UUID доставки из `delivery_db.deliveries`, а не UUID заказа. Успешное завершение возвращает `204 No Content`.
+
+## Обработка заказа
+
+1. Order получает позиции и проверяет их через Catalog.
+2. Заказ сохраняется вместе со снимком названий и цен.
+3. После подтверждения демонстрационной оплаты событие записывается в outbox.
+4. Publisher отправляет `order.ready_for_delivery` в Kafka.
+5. Delivery сохраняет доставку в очередь, Notification создаёт задание на письмо.
+6. При наличии свободного курьера Delivery назначает его и публикует `delivery.courier_assigned`.
+7. После завершения доставки событие `delivery.completed` обновляет статус заказа на `delivered`.
+
+Письма доступны в Mailpit: http://localhost:8025.
+
+## Миграции
+
+Миграции выполняются отдельным контейнером перед запуском приложений. История версий и контрольные суммы сохраняются в `app_schema_migrations`.
+
+Поддерживается перенос чистой истории golang-migrate из таблицы `schema_migrations`. Состояние `dirty=true` блокирует обновление до исправления незавершённой миграции.
+
+Для существующих таблиц без истории предусмотрен параметр `-baseline`. Он указывает последнюю фактически применённую миграцию.
+
+Например, если в Order уже применены версии 1–8:
+
+```powershell
+docker compose -f compose.yaml -f compose.local.yaml run --rm migrate -service order -baseline 8
+```
+
+Команда фиксирует версии 1–8 и применяет последующие. Параметр не проверяет соответствие существующей схемы SQL-файлам, поэтому версия определяется по состоянию БД. Для новой пустой БД baseline не требуется.
+
+После переноса истории дальнейшие обновления выполняются через migration runner проекта.
+
+## Тестирование
+
+Запуск автоматических тестов:
 
 ```powershell
 go test ./... ./services/catalog/... ./services/order/... ./services/delivery/... ./services/notification/... ./services/user/... ./gen/...
+```
+
+Статическая проверка:
+
+```powershell
 go vet ./... ./services/catalog/... ./services/order/... ./services/delivery/... ./services/notification/... ./services/user/... ./gen/...
 ```
 
-Для интеграционных тестов используй отдельную тестовую PostgreSQL БД. Тестовый пользователь должен иметь права создания и удаления схем:
+Интеграционные тесты PostgreSQL используют отдельную тестовую БД:
 
 ```powershell
 $env:TEST_DATABASE_URL='postgres://app:catalog@localhost:5433/test_db?sslmode=disable'
+
 go test -count=1 ./services/order/internal/repository ./services/delivery/internal/repository ./services/notification/internal/repository ./services/user/internal/repository
 ```
 
-Без `TEST_DATABASE_URL` эти тесты явно пропускаются. Они работают во временных случайных схемах; `test_db` нужно создать заранее. CI запускает PostgreSQL и выполняет интеграционные тесты и `go test -race`.
+База `test_db` создаётся заранее. Тесты работают во временных схемах; пользователь БД должен иметь права их создания и удаления.
 
-## Локальная разработка без контейнеров приложений
+Без `TEST_DATABASE_URL` интеграционные тесты PostgreSQL пропускаются. GitHub Actions запускает PostgreSQL, тесты и race detector.
 
-```powershell
-docker compose up -d
-.\scripts\load-env.ps1
-go run ./cmd/migrate
-# После создания Kafka topics запусти каждый сервис в отдельном терминале:
-go run ./services/catalog/cmd/catalog
-go run ./services/user/cmd/user
-go run ./services/order/cmd/order
-go run ./services/delivery/cmd/delivery
-go run ./services/notification/cmd/notification
-```
+## Ограничения
 
-Каждый терминал должен загрузить переменные из `.env`. Нужные топики: `order.ready_for_delivery`, `delivery.courier_assigned`, `delivery.completed` и отдельный `<topic>.dlq` для каждого из них. Если до этого применялся `compose.local.yaml`, для внутреннего listener используй `kafka:29092`, для программ на хосте — `localhost:9092`.
+- Оплата демонстрационная: endpoint `/pay` доступен при `DEMO_PAYMENTS=true`, платёжный провайдер не подключён.
+- Готовность заказа к доставке наступает после демонстрационной оплаты; этап приготовления отдельно не моделируется.
+- SMTP настроен для локального Mailpit.
+- Kafka и внутренний gRPC в локальной конфигурации работают без TLS.
+- Серверная корзина отсутствует: клиент передаёт выбранные позиции напрямую при создании заказа.
